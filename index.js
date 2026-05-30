@@ -16,72 +16,88 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Full CRM schema
-(async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS leads (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) DEFAULT '',
-        email VARCHAR(255) DEFAULT '',
-        phone VARCHAR(50) DEFAULT '',
-        message TEXT DEFAULT '',
-        lead_source VARCHAR(100) DEFAULT 'Website',
-        property_interest VARCHAR(255) DEFAULT '',
-        preferred_location VARCHAR(255) DEFAULT '',
-        budget_min INTEGER,
-        budget_max INTEGER,
-        timeline VARCHAR(100) DEFAULT '1-3 Months',
-        stage VARCHAR(50) DEFAULT 'new_lead',
-        ai_score INTEGER DEFAULT 50,
-        notes TEXT DEFAULT '',
-        last_contacted VARCHAR(100) DEFAULT '',
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS communications (
-        id SERIAL PRIMARY KEY,
-        lead_id INTEGER REFERENCES leads(id) ON DELETE CASCADE,
-        channel VARCHAR(50) DEFAULT 'Note',
-        direction VARCHAR(20) DEFAULT 'outbound',
-        content TEXT DEFAULT '',
-        ai_generated INTEGER DEFAULT 0,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS appointments (
-        id SERIAL PRIMARY KEY,
-        lead_id INTEGER REFERENCES leads(id) ON DELETE CASCADE,
-        title VARCHAR(255) DEFAULT '',
-        appt_type VARCHAR(100) DEFAULT 'Showing',
-        start_time TIMESTAMPTZ,
-        end_time TIMESTAMPTZ,
-        status VARCHAR(50) DEFAULT 'scheduled',
-        notes TEXT DEFAULT '',
-        lead_name VARCHAR(255) DEFAULT '',
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS campaigns (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) DEFAULT '',
-        campaign_type VARCHAR(50) DEFAULT 'email',
-        subject VARCHAR(255) DEFAULT '',
-        content TEXT DEFAULT '',
-        status VARCHAR(50) DEFAULT 'draft',
-        sent_count INTEGER DEFAULT 0,
-        opened_count INTEGER DEFAULT 0,
-        clicked_count INTEGER DEFAULT 0,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
-      CREATE INDEX IF NOT EXISTS idx_comms_lead ON communications(lead_id);
-      CREATE INDEX IF NOT EXISTS idx_appts_lead ON appointments(lead_id);
-    `);
-    console.log('Database ready (CRM schema)');
-  } catch (e) {
-    console.error('Database setup failed:', e.message);
-    process.exit(1);
+// Database — retry on startup instead of crashing
+let dbReady = false;
+
+const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS leads (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) DEFAULT '',
+    email VARCHAR(255) DEFAULT '',
+    phone VARCHAR(50) DEFAULT '',
+    message TEXT DEFAULT '',
+    lead_source VARCHAR(100) DEFAULT 'Website',
+    property_interest VARCHAR(255) DEFAULT '',
+    preferred_location VARCHAR(255) DEFAULT '',
+    budget_min INTEGER,
+    budget_max INTEGER,
+    timeline VARCHAR(100) DEFAULT '1-3 Months',
+    stage VARCHAR(50) DEFAULT 'new_lead',
+    ai_score INTEGER DEFAULT 50,
+    notes TEXT DEFAULT '',
+    last_contacted VARCHAR(100) DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS communications (
+    id SERIAL PRIMARY KEY,
+    lead_id INTEGER REFERENCES leads(id) ON DELETE CASCADE,
+    channel VARCHAR(50) DEFAULT 'Note',
+    direction VARCHAR(20) DEFAULT 'outbound',
+    content TEXT DEFAULT '',
+    ai_generated INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS appointments (
+    id SERIAL PRIMARY KEY,
+    lead_id INTEGER REFERENCES leads(id) ON DELETE CASCADE,
+    title VARCHAR(255) DEFAULT '',
+    appt_type VARCHAR(100) DEFAULT 'Showing',
+    start_time TIMESTAMPTZ,
+    end_time TIMESTAMPTZ,
+    status VARCHAR(50) DEFAULT 'scheduled',
+    notes TEXT DEFAULT '',
+    lead_name VARCHAR(255) DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS campaigns (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) DEFAULT '',
+    campaign_type VARCHAR(50) DEFAULT 'email',
+    subject VARCHAR(255) DEFAULT '',
+    content TEXT DEFAULT '',
+    status VARCHAR(50) DEFAULT 'draft',
+    sent_count INTEGER DEFAULT 0,
+    opened_count INTEGER DEFAULT 0,
+    clicked_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
+  CREATE INDEX IF NOT EXISTS idx_comms_lead ON communications(lead_id);
+  CREATE INDEX IF NOT EXISTS idx_appts_lead ON appointments(lead_id);
+`;
+
+async function initDB(retries = 10) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await pool.query(SCHEMA);
+      dbReady = true;
+      console.log('Database ready (CRM schema)');
+      return;
+    } catch (e) {
+      console.error(`DB attempt ${i + 1}/${retries} failed:`, e.message);
+      if (i < retries - 1) await new Promise(r => setTimeout(r, 3000));
+    }
   }
-})();
+  console.error('DB never came up — running without database');
+}
+initDB();
+
+// Middleware: require DB for data routes
+function requireDB(req, res, next) {
+  if (!dbReady) return res.status(503).json({ error: 'Database unavailable — retrying' });
+  next();
+}
 
 // ── Serve CRM frontend ──
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
@@ -92,7 +108,7 @@ app.get('/api/auth/me', (req, res) => {
 });
 
 // ── Leads CRUD ──
-app.get('/api/leads', async (req, res) => {
+app.get('/api/leads', requireDB, async (req, res) => {
   try {
     const { search, stage } = req.query;
     let q = 'SELECT * FROM leads WHERE 1=1';
@@ -105,7 +121,7 @@ app.get('/api/leads', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/leads/:id', async (req, res) => {
+app.get('/api/leads/:id', requireDB, async (req, res) => {
   try {
     const { rows: [lead] } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
     if (!lead) return res.status(404).json({ error: 'Not found' });
@@ -115,7 +131,7 @@ app.get('/api/leads/:id', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/leads', async (req, res) => {
+app.post('/api/leads', requireDB, async (req, res) => {
   try {
     const d = req.body;
     const { rows: [lead] } = await pool.query(
@@ -127,7 +143,7 @@ app.post('/api/leads', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/leads/:id', async (req, res) => {
+app.put('/api/leads/:id', requireDB, async (req, res) => {
   try {
     const d = req.body;
     const { rows: [lead] } = await pool.query(
@@ -139,14 +155,14 @@ app.put('/api/leads/:id', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/leads/:id', async (req, res) => {
+app.delete('/api/leads/:id', requireDB, async (req, res) => {
   try {
     await pool.query('DELETE FROM leads WHERE id=$1', [req.params.id]);
     res.json({ success: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/leads/:id/stage', async (req, res) => {
+app.put('/api/leads/:id/stage', requireDB, async (req, res) => {
   try {
     const { rows: [lead] } = await pool.query('UPDATE leads SET stage=$1, updated_at=NOW() WHERE id=$2 RETURNING *', [req.body.stage, req.params.id]);
     if (!lead) return res.status(404).json({ error: 'Not found' });
@@ -154,16 +170,16 @@ app.put('/api/leads/:id/stage', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/leads/:id/score', async (req, res) => {
+app.post('/api/leads/:id/score', requireDB, async (req, res) => {
   try {
-    const score = Math.floor(Math.random() * 30) + 65; // 65-94 range
+    const score = Math.floor(Math.random() * 30) + 65;
     const { rows: [lead] } = await pool.query('UPDATE leads SET ai_score=$1 WHERE id=$2 RETURNING *', [score, req.params.id]);
     res.json(lead);
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 // ── Communications ──
-app.post('/api/leads/:id/communications', async (req, res) => {
+app.post('/api/leads/:id/communications', requireDB, async (req, res) => {
   try {
     const d = req.body;
     await pool.query('INSERT INTO communications (lead_id,channel,direction,content,ai_generated) VALUES ($1,$2,$3,$4,$5)', [req.params.id, d.channel||'Note', d.direction||'outbound', d.content||'', d.ai_generated||0]);
@@ -173,7 +189,7 @@ app.post('/api/leads/:id/communications', async (req, res) => {
 });
 
 // ── Appointments ──
-app.get('/api/appointments', async (req, res) => {
+app.get('/api/appointments', requireDB, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT a.*, l.name as lead_name FROM appointments a LEFT JOIN leads l ON a.lead_id = l.id ORDER BY a.start_time DESC LIMIT 100
@@ -182,7 +198,7 @@ app.get('/api/appointments', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/appointments', async (req, res) => {
+app.post('/api/appointments', requireDB, async (req, res) => {
   try {
     const d = req.body;
     const { rows: [lead] } = await pool.query('SELECT name FROM leads WHERE id=$1', [d.lead_id]);
@@ -194,7 +210,7 @@ app.post('/api/appointments', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/appointments/:id', async (req, res) => {
+app.put('/api/appointments/:id', requireDB, async (req, res) => {
   try {
     const { rows: [appt] } = await pool.query('UPDATE appointments SET status=$1 WHERE id=$2 RETURNING *', [req.body.status, req.params.id]);
     res.json(appt);
@@ -202,14 +218,14 @@ app.put('/api/appointments/:id', async (req, res) => {
 });
 
 // ── Campaigns ──
-app.get('/api/campaigns', async (req, res) => {
+app.get('/api/campaigns', requireDB, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM campaigns ORDER BY created_at DESC');
     res.json(rows);
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/campaigns', async (req, res) => {
+app.post('/api/campaigns', requireDB, async (req, res) => {
   try {
     const d = req.body;
     const { rows: [camp] } = await pool.query(
@@ -220,7 +236,7 @@ app.post('/api/campaigns', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/campaigns/:id', async (req, res) => {
+app.put('/api/campaigns/:id', requireDB, async (req, res) => {
   try {
     const d = req.body;
     const { rows: [camp] } = await pool.query(
@@ -232,7 +248,7 @@ app.put('/api/campaigns/:id', async (req, res) => {
 });
 
 // ── AI Generate ──
-app.post('/api/ai/generate', async (req, res) => {
+app.post('/api/ai/generate', (req, res) => {
   const { type, tone, lead_context } = req.body;
   const name = lead_context?.name || 'there';
   const templates = {
@@ -248,7 +264,7 @@ app.post('/api/ai/generate', async (req, res) => {
 });
 
 // ── Analytics ──
-app.get('/api/analytics/dashboard', async (req, res) => {
+app.get('/api/analytics/dashboard', requireDB, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
     const { rows: [{ count: total }] } = await pool.query('SELECT COUNT(*)::int as count FROM leads');
@@ -266,7 +282,7 @@ app.get('/api/analytics/dashboard', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/analytics/performance', async (req, res) => {
+app.get('/api/analytics/performance', requireDB, async (req, res) => {
   try {
     const { rows: sources } = await pool.query(`
       SELECT lead_source, COUNT(*)::int as total,
@@ -281,6 +297,6 @@ app.get('/api/analytics/performance', async (req, res) => {
 });
 
 // ── Health ──
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', db: dbReady ? 'connected' : 'retrying', timestamp: new Date().toISOString() }));
 
 app.listen(PORT, () => console.log(`LeadFlow CRM running on port ${PORT}`));
