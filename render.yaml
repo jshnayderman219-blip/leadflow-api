@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: leadflow
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: alivion-leads-db
+          property: connectionString
+
+databases:
+  - name: alivion-leads-db
+    plan: free
