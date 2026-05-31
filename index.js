@@ -12,8 +12,7 @@ app.use(express.json());
 
 // PostgreSQL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL
 });
 
 // Database — retry on startup instead of crashing
