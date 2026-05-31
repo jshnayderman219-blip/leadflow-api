@@ -77,7 +77,8 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_appts_lead ON appointments(lead_id);
 `;
 
-async function initDB(retries = 10) {
+async function initDB(retries = 3) {
+  let lastError = null;
   for (let i = 0; i < retries; i++) {
     try {
       await pool.query(SCHEMA);
@@ -85,14 +86,17 @@ async function initDB(retries = 10) {
       console.log('Database ready (CRM schema)');
       return;
     } catch (e) {
+      lastError = e;
       console.error(`DB attempt ${i + 1}/${retries} failed:`, e.message);
       if (i < retries - 1) await new Promise(r => setTimeout(r, 3000));
     }
   }
-  console.error('DB never came up — exiting so Render restarts us');
-  process.exit(1);
+  console.error('Database unavailable, running in proxy mode:', lastError?.message);
 }
 initDB();
+
+// Proxy URL for lead operations when DB is down
+const PROXY_URL = 'https://alivion-lead-flow.onrender.com';
 
 // Middleware: require DB for data routes
 function requireDB(req, res, next) {
@@ -108,39 +112,89 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ id: 1, full_name: 'Alex Morgan', email: 'demo@leadflow.ai', role: 'agent', plan: 'professional', subscription: { plan: 'professional', status: 'active' } });
 });
 
-// ── Leads CRUD ──
-app.get('/api/leads', requireDB, async (req, res) => {
+// ── Leads CRUD (proxied through alivion-lead-flow when DB is down) ──
+app.get('/api/leads', async (req, res) => {
+  if (dbReady) {
+    // Use direct DB
+    try {
+      const { search, stage } = req.query;
+      let q = 'SELECT * FROM leads WHERE 1=1';
+      const params = [];
+      if (search) { params.push(`%${search}%`); q += ` AND (name ILIKE $${params.length} OR email ILIKE $${params.length} OR phone ILIKE $${params.length})`; }
+      if (stage) { params.push(stage); q += ` AND stage = $${params.length}`; }
+      q += ' ORDER BY created_at DESC LIMIT 200';
+      const { rows } = await pool.query(q, params);
+      return res.json(rows);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  // Proxy mode
   try {
-    const { search, stage } = req.query;
-    let q = 'SELECT * FROM leads WHERE 1=1';
-    const params = [];
-    if (search) { params.push(`%${search}%`); q += ` AND (name ILIKE $${params.length} OR email ILIKE $${params.length} OR phone ILIKE $${params.length})`; }
-    if (stage) { params.push(stage); q += ` AND stage = $${params.length}`; }
-    q += ' ORDER BY created_at DESC LIMIT 200';
-    const { rows } = await pool.query(q, params);
-    res.json(rows);
+    const r = await fetch(`${PROXY_URL}/api/leads`);
+    const data = await r.json();
+    // Map alivion format {leads:[], count:N} to CRM flat array
+    const leads = (data.leads || data).map(l => ({
+      id: l.id,
+      name: l.name || '',
+      email: l.email || '',
+      phone: l.phone || '',
+      lead_source: l.source || 'Website',
+      message: l.message || '',
+      stage: 'new_lead',
+      ai_score: 50,
+      created_at: l.created_at
+    }));
+    res.json(leads);
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/leads/:id', requireDB, async (req, res) => {
-  try {
-    const { rows: [lead] } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
-    if (!lead) return res.status(404).json({ error: 'Not found' });
-    const { rows: comms } = await pool.query('SELECT * FROM communications WHERE lead_id=$1 ORDER BY created_at DESC', [req.params.id]);
-    const { rows: appts } = await pool.query('SELECT * FROM appointments WHERE lead_id=$1 ORDER BY start_time', [req.params.id]);
-    res.json({ ...lead, communications: comms, appointments: appts });
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.get('/api/leads/:id', async (req, res) => {
+  if (dbReady) {
+    try {
+      const { rows: [lead] } = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
+      if (!lead) return res.status(404).json({ error: 'Not found' });
+      const { rows: comms } = await pool.query('SELECT * FROM communications WHERE lead_id=$1 ORDER BY created_at DESC', [req.params.id]);
+      const { rows: appts } = await pool.query('SELECT * FROM appointments WHERE lead_id=$1 ORDER BY start_time', [req.params.id]);
+      return res.json({ ...lead, communications: comms, appointments: appts });
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.status(503).json({ error: 'Database unavailable' });
 });
 
-app.post('/api/leads', requireDB, async (req, res) => {
+app.post('/api/leads', async (req, res) => {
+  if (dbReady) {
+    try {
+      const d = req.body;
+      const { rows: [lead] } = await pool.query(
+        `INSERT INTO leads (name,email,phone,lead_source,property_interest,preferred_location,budget_min,budget_max,timeline,stage,notes,ai_score)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,50) RETURNING *`,
+        [d.name||'', d.email||'', d.phone||'', d.lead_source||'Website', d.property_interest||'', d.preferred_location||'', d.budget_min||null, d.budget_max||null, d.timeline||'1-3 Months', d.stage||'new_lead', d.notes||'']
+      );
+      return res.status(201).json(lead);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  // Proxy mode — forward to alivion API
   try {
-    const d = req.body;
-    const { rows: [lead] } = await pool.query(
-      `INSERT INTO leads (name,email,phone,lead_source,property_interest,preferred_location,budget_min,budget_max,timeline,stage,notes,ai_score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,50) RETURNING *`,
-      [d.name||'', d.email||'', d.phone||'', d.lead_source||'Website', d.property_interest||'', d.preferred_location||'', d.budget_min||null, d.budget_max||null, d.timeline||'1-3 Months', d.stage||'new_lead', d.notes||'']
-    );
-    res.status(201).json(lead);
+    const r = await fetch(`${PROXY_URL}/api/leads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: req.body.name || '',
+        email: req.body.email || '',
+        phone: req.body.phone || '',
+        message: req.body.message || '',
+        source: req.body.lead_source || 'Website'
+      })
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json(data);
+    res.status(201).json({
+      id: data.id,
+      name: req.body.name || '',
+      email: req.body.email || '',
+      phone: req.body.phone || '',
+      lead_source: req.body.lead_source || 'Website',
+      created_at: data.created_at
+    });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
