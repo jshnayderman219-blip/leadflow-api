@@ -243,26 +243,43 @@ app.post('/api/leads/:id/communications', requireDB, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-// ── Appointments ──
-app.get('/api/appointments', requireDB, async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT a.*, l.name as lead_name FROM appointments a LEFT JOIN leads l ON a.lead_id = l.id ORDER BY a.start_time DESC LIMIT 100
-    `);
-    res.json(rows);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+// ── Appointments (mock in proxy mode) ──
+app.get('/api/appointments', async (req, res) => {
+  if (dbReady) {
+    try {
+      const { rows } = await pool.query(`SELECT a.*, l.name as lead_name FROM appointments a LEFT JOIN leads l ON a.lead_id = l.id ORDER BY a.start_time DESC LIMIT 100`);
+      return res.json(rows);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json([]);
 });
 
-app.post('/api/appointments', requireDB, async (req, res) => {
-  try {
-    const d = req.body;
-    const { rows: [lead] } = await pool.query('SELECT name FROM leads WHERE id=$1', [d.lead_id]);
-    const { rows: [appt] } = await pool.query(
-      'INSERT INTO appointments (lead_id,title,appt_type,start_time,end_time,notes,lead_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
-      [d.lead_id, d.title||'', d.appt_type||'Showing', d.start_time, d.end_time, d.notes||'', lead?.name||'']
-    );
-    res.status(201).json(appt);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.post('/api/appointments', async (req, res) => {
+  if (dbReady) {
+    try {
+      const d = req.body;
+      const { rows: [lead] } = await pool.query('SELECT name FROM leads WHERE id=$1', [d.lead_id]);
+      const { rows: [appt] } = await pool.query(
+        'INSERT INTO appointments (lead_id,title,appt_type,start_time,end_time,notes,lead_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+        [d.lead_id, d.title||'', d.appt_type||'Showing', d.start_time, d.end_time, d.notes||'', lead?.name||'']
+      );
+      return res.status(201).json(appt);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  // Mock in proxy mode
+  const d = req.body;
+  res.status(201).json({
+    id: Date.now(),
+    lead_id: d.lead_id || 1,
+    title: d.title || 'Appointment',
+    appt_type: d.appt_type || 'Showing',
+    start_time: d.start_time,
+    end_time: d.end_time,
+    status: 'scheduled',
+    notes: d.notes || '',
+    lead_name: 'Lead',
+    created_at: new Date().toISOString()
+  });
 });
 
 app.put('/api/appointments/:id', requireDB, async (req, res) => {
