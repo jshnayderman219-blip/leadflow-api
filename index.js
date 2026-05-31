@@ -12,7 +12,8 @@ app.use(express.json());
 
 // PostgreSQL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
 // Database — retry on startup instead of crashing
@@ -88,7 +89,8 @@ async function initDB(retries = 10) {
       if (i < retries - 1) await new Promise(r => setTimeout(r, 3000));
     }
   }
-  console.error('DB never came up — running without database');
+  console.error('DB never came up — exiting so Render restarts us');
+  process.exit(1);
 }
 initDB();
 
@@ -296,6 +298,6 @@ app.get('/api/analytics/performance', requireDB, async (req, res) => {
 });
 
 // ── Health ──
-app.get('/api/health', (req, res) => res.json({ status: 'ok', db: dbReady ? 'connected' : 'retrying', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', db: dbReady ? 'connected' : 'retrying', has_db_url: !!process.env.DATABASE_URL, timestamp: new Date().toISOString() }));
 
 app.listen(PORT, () => console.log(`LeadFlow CRM running on port ${PORT}`));
