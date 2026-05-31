@@ -198,49 +198,54 @@ app.post('/api/leads', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/leads/:id', requireDB, async (req, res) => {
-  try {
-    const d = req.body;
-    const { rows: [lead] } = await pool.query(
-      `UPDATE leads SET name=$1,email=$2,phone=$3,lead_source=$4,property_interest=$5,preferred_location=$6,budget_min=$7,budget_max=$8,timeline=$9,stage=$10,notes=$11,updated_at=NOW() WHERE id=$12 RETURNING *`,
-      [d.name||'', d.email||'', d.phone||'', d.lead_source||'', d.property_interest||'', d.preferred_location||'', d.budget_min||null, d.budget_max||null, d.timeline||'', d.stage||'', d.notes||'', req.params.id]
-    );
-    if (!lead) return res.status(404).json({ error: 'Not found' });
-    res.json(lead);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.post('/api/leads/:id/score', async (req, res) => {
+  if (dbReady) {
+    try {
+      const score = Math.floor(Math.random() * 30) + 65;
+      const { rows: [lead] } = await pool.query('UPDATE leads SET ai_score=$1 WHERE id=$2 RETURNING *', [score, req.params.id]);
+      return res.json(lead);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ id: parseInt(req.params.id), ai_score: Math.floor(Math.random() * 30) + 65 });
 });
 
-app.delete('/api/leads/:id', requireDB, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM leads WHERE id=$1', [req.params.id]);
-    res.json({ success: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+// ── Communications (mock in proxy mode) ──
+app.post('/api/leads/:id/communications', async (req, res) => {
+  if (dbReady) {
+    try {
+      const d = req.body;
+      await pool.query('INSERT INTO communications (lead_id,channel,direction,content,ai_generated) VALUES ($1,$2,$3,$4,$5)', [req.params.id, d.channel||'Note', d.direction||'outbound', d.content||'', d.ai_generated||0]);
+      await pool.query('UPDATE leads SET last_contacted=$1, updated_at=NOW() WHERE id=$2', [new Date().toISOString().split('T')[0], req.params.id]);
+      return res.status(201).json({ success: true });
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.status(201).json({ success: true });
 });
 
-app.put('/api/leads/:id/stage', requireDB, async (req, res) => {
-  try {
-    const { rows: [lead] } = await pool.query('UPDATE leads SET stage=$1, updated_at=NOW() WHERE id=$2 RETURNING *', [req.body.stage, req.params.id]);
-    if (!lead) return res.status(404).json({ error: 'Not found' });
-    res.json(lead);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+// ── Analytics (mock in proxy mode) ──
+app.get('/api/analytics/dashboard', async (req, res) => {
+  if (dbReady) {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const { rows: [{ count: total }] } = await pool.query('SELECT COUNT(*)::int as count FROM leads');
+      const { rows: [{ count: todayCount }] } = await pool.query('SELECT COUNT(*)::int as count FROM leads WHERE created_at::date = $1', [today]);
+      const { rows: stageRows } = await pool.query('SELECT stage, COUNT(*)::int as count FROM leads GROUP BY stage');
+      const dist = {};
+      for (const r of stageRows) dist[r.stage] = r.count;
+      return res.json({ new_leads_today: todayCount, active_conversations: total, upcoming_followups: 0, appointments_scheduled: 0, listings_under_contract: dist.under_contract || 0, closed_transactions: dist.closed || 0, monthly_revenue: (dist.closed || 0) * 350000, conversion_rate: total > 0 ? Math.round((dist.closed || 0) / total * 100) : 0, total_leads: total, ai_score_avg: 72, stage_distribution: dist });
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ new_leads_today: 0, active_conversations: 0, upcoming_followups: 0, appointments_scheduled: 0, listings_under_contract: 0, closed_transactions: 0, monthly_revenue: 0, conversion_rate: 0, total_leads: 0, ai_score_avg: 0, stage_distribution: {} });
 });
 
-app.post('/api/leads/:id/score', requireDB, async (req, res) => {
-  try {
-    const score = Math.floor(Math.random() * 30) + 65;
-    const { rows: [lead] } = await pool.query('UPDATE leads SET ai_score=$1 WHERE id=$2 RETURNING *', [score, req.params.id]);
-    res.json(lead);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
-// ── Communications ──
-app.post('/api/leads/:id/communications', requireDB, async (req, res) => {
-  try {
-    const d = req.body;
-    await pool.query('INSERT INTO communications (lead_id,channel,direction,content,ai_generated) VALUES ($1,$2,$3,$4,$5)', [req.params.id, d.channel||'Note', d.direction||'outbound', d.content||'', d.ai_generated||0]);
-    await pool.query('UPDATE leads SET last_contacted=$1, updated_at=NOW() WHERE id=$2', [new Date().toISOString().split('T')[0], req.params.id]);
-    res.status(201).json({ success: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.get('/api/analytics/performance', async (req, res) => {
+  if (dbReady) {
+    try {
+      const { rows: sources } = await pool.query(`SELECT lead_source, COUNT(*)::int as total, COUNT(*) FILTER (WHERE stage='closed')::int as closed FROM leads GROUP BY lead_source`);
+      return res.json({ lead_sources: sources, response_metrics: { total_comms: 10, inbound: 3 } });
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ lead_sources: [], response_metrics: { total_comms: 0, inbound: 0 } });
 });
 
 // ── Appointments (mock in proxy mode) ──
@@ -282,41 +287,81 @@ app.post('/api/appointments', async (req, res) => {
   });
 });
 
-app.put('/api/appointments/:id', requireDB, async (req, res) => {
-  try {
-    const { rows: [appt] } = await pool.query('UPDATE appointments SET status=$1 WHERE id=$2 RETURNING *', [req.body.status, req.params.id]);
-    res.json(appt);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.put('/api/appointments/:id', async (req, res) => {
+  if (dbReady) {
+    try {
+      const { rows: [appt] } = await pool.query('UPDATE appointments SET status=$1 WHERE id=$2 RETURNING *', [req.body.status, req.params.id]);
+      return res.json(appt);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ id: parseInt(req.params.id), status: req.body.status });
 });
 
-// ── Campaigns ──
-app.get('/api/campaigns', requireDB, async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT * FROM campaigns ORDER BY created_at DESC');
-    res.json(rows);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+// ── Campaigns (mock in proxy mode) ──
+app.get('/api/campaigns', async (req, res) => {
+  if (dbReady) {
+    try {
+      const { rows } = await pool.query('SELECT * FROM campaigns ORDER BY created_at DESC');
+      return res.json(rows);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json([]);
 });
 
-app.post('/api/campaigns', requireDB, async (req, res) => {
-  try {
-    const d = req.body;
-    const { rows: [camp] } = await pool.query(
-      'INSERT INTO campaigns (name,campaign_type,subject,content) VALUES ($1,$2,$3,$4) RETURNING *',
-      [d.name||'', d.campaign_type||'email', d.subject||'', d.content||'']
-    );
-    res.status(201).json(camp);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.post('/api/campaigns', async (req, res) => {
+  if (dbReady) {
+    try {
+      const d = req.body;
+      const { rows: [camp] } = await pool.query('INSERT INTO campaigns (name,campaign_type,subject,content) VALUES ($1,$2,$3,$4) RETURNING *', [d.name||'', d.campaign_type||'email', d.subject||'', d.content||'']);
+      return res.status(201).json(camp);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.status(201).json({ id: Date.now(), name: req.body.name||'', campaign_type: req.body.campaign_type||'email', status: 'draft', created_at: new Date().toISOString() });
 });
 
-app.put('/api/campaigns/:id', requireDB, async (req, res) => {
-  try {
-    const d = req.body;
-    const { rows: [camp] } = await pool.query(
-      'UPDATE campaigns SET status=$1, sent_count=$2 WHERE id=$3 RETURNING *',
-      [d.status||'sent', d.sent_count||0, req.params.id]
-    );
-    res.json(camp);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+app.put('/api/campaigns/:id', async (req, res) => {
+  if (dbReady) {
+    try {
+      const d = req.body;
+      const { rows: [camp] } = await pool.query('UPDATE campaigns SET status=$1, sent_count=$2 WHERE id=$3 RETURNING *', [d.status||'sent', d.sent_count||0, req.params.id]);
+      return res.json(camp);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ id: parseInt(req.params.id), status: req.body.status||'sent' });
+});
+
+// ── Lead mutations (mock in proxy mode) ──
+app.put('/api/leads/:id', async (req, res) => {
+  if (dbReady) {
+    try {
+      const d = req.body;
+      const { rows: [lead] } = await pool.query(`UPDATE leads SET name=$1,email=$2,phone=$3,lead_source=$4,property_interest=$5,preferred_location=$6,budget_min=$7,budget_max=$8,timeline=$9,stage=$10,notes=$11,updated_at=NOW() WHERE id=$12 RETURNING *`, [d.name||'', d.email||'', d.phone||'', d.lead_source||'', d.property_interest||'', d.preferred_location||'', d.budget_min||null, d.budget_max||null, d.timeline||'', d.stage||'', d.notes||'', req.params.id]);
+      if (!lead) return res.status(404).json({ error: 'Not found' });
+      return res.json(lead);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ ...req.body, id: parseInt(req.params.id), updated_at: new Date().toISOString() });
+});
+
+app.delete('/api/leads/:id', async (req, res) => {
+  if (dbReady) {
+    try {
+      await pool.query('DELETE FROM leads WHERE id=$1', [req.params.id]);
+      return res.json({ success: true });
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ success: true });
+});
+
+app.put('/api/leads/:id/stage', async (req, res) => {
+  if (dbReady) {
+    try {
+      const { rows: [lead] } = await pool.query('UPDATE leads SET stage=$1, updated_at=NOW() WHERE id=$2 RETURNING *', [req.body.stage, req.params.id]);
+      if (!lead) return res.status(404).json({ error: 'Not found' });
+      return res.json(lead);
+    } catch (e) { console.error(e); return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ id: parseInt(req.params.id), stage: req.body.stage });
 });
 
 // ── AI Generate ──
@@ -333,39 +378,6 @@ app.post('/api/ai/generate', (req, res) => {
   };
   const content = (templates[type] || templates.sms_followup)[tone || 'professional'] || Object.values(templates.sms_followup)[0];
   res.json({ content, ai_generated: true, type, tone });
-});
-
-// ── Analytics ──
-app.get('/api/analytics/dashboard', requireDB, async (req, res) => {
-  try {
-    const today = new Date().toISOString().split('T')[0];
-    const { rows: [{ count: total }] } = await pool.query('SELECT COUNT(*)::int as count FROM leads');
-    const { rows: [{ count: todayCount }] } = await pool.query('SELECT COUNT(*)::int as count FROM leads WHERE created_at::date = $1', [today]);
-    const { rows: stageRows } = await pool.query('SELECT stage, COUNT(*)::int as count FROM leads GROUP BY stage');
-    const dist = {};
-    for (const r of stageRows) dist[r.stage] = r.count;
-    res.json({
-      new_leads_today: todayCount, active_conversations: total, upcoming_followups: 0,
-      appointments_scheduled: 0, listings_under_contract: dist.under_contract || 0,
-      closed_transactions: dist.closed || 0, monthly_revenue: (dist.closed || 0) * 350000,
-      conversion_rate: total > 0 ? Math.round((dist.closed || 0) / total * 100) : 0,
-      total_leads: total, ai_score_avg: 72, stage_distribution: dist
-    });
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/analytics/performance', requireDB, async (req, res) => {
-  try {
-    const { rows: sources } = await pool.query(`
-      SELECT lead_source, COUNT(*)::int as total,
-        COUNT(*) FILTER (WHERE stage='closed')::int as closed
-      FROM leads GROUP BY lead_source
-    `);
-    res.json({
-      lead_sources: sources,
-      response_metrics: { total_comms: 10, inbound: 3 }
-    });
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 // ── Health ──
